@@ -1,0 +1,124 @@
+#!/opt/R-3.2.3/bin//Rscript
+
+# ================================================================================ 
+# Step 2b: Predict PLSR model for single HRU P or T with input  
+#          variables (cross-validated)
+#
+# Created by S. Baker, June 2018
+# ================================================================================ 
+rm(list=ls()); beg.time = Sys.time()
+
+## === Source to Input Data
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/0_control_PLSRmdl.R")
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/ProcessDataFunc.R")
+
+## === input arguments
+args = commandArgs(trailingOnly=TRUE)
+argsLen <- length(args)
+
+# test if there is at least one argument: if not, return an error
+if (argsLen != 1 & !exists('preds')) {
+  stop("Two argument must be supplied: CFSv2 var name in folder
+       (eg. 'z500_f') and name in nc (eg. 'HGT_500mb').", call.=FALSE)
+} else if (argsLen == 1) {
+  preds <- as.numeric(strsplit(args, ",")[[1]]) # eg. 2,3,4
+  if (exists('preds')) { print("Warning: Commandline 'pred' input overrides 'preds' in source input")}
+}
+print(preds)
+
+# preds = c(2,8,11)
+
+
+### === Output file names
+if (cut_domain) {
+  file_mdlResults  = paste0('CVresults_',pred_var, '_',hru,'_wk', wk, '_mon.', pred_mon,'_cut.',cut_num,'_lag.',l,
+                                   '_', paste(preds, collapse = '.'),'_base.rds')
+} else {
+  file_mdlResults  = paste0('CVresults_',pred_var, '_',hru,'_wk', wk, '_mon.', pred_mon,'_base.rds')
+}
+
+##### ===== Load CFSv2 Data
+setwd(out_model_dir)
+load(file = file_data)
+nms = names(data_out)
+
+## extract objects
+pred_cfs = data_out[[nms[1]]]
+grid = data_out[[nms[2]]]
+var_nms = c(data_out[[nms[3]]], 'hru_cfs')
+date_cfs = data_out[[nms[4]]]
+rm(data_out)
+
+## process data into PLSR predictor and predictand format (scaled)
+f.out = ReadProcInputData(preds, pred_cfs, grid, var_nms, date_cfs)
+
+##### =====  get groups for validation
+Ntime           = length(pred_cfs[1,1,1,])
+date_val        = filter(f.out$date_v, mon == pred_mon)
+Nval            = nrow(date_val)
+Ngroups         = ceiling(Nval/Ntime_sub)
+cutgroup        = sapply(1:Ngroups, function(j) c(rep(j,Ntime_sub)))[1:Nval] #not random
+xvalindex       = split(date_val$ind, cutgroup) # validate on these indexes
+Nsegments       = length(xvalindex)-1
+
+
+##### ===== Predicat - loop over training/verification groups
+print(paste(pred_var, '- PLSR for variables in CV - Forecasting', wk, 'wk -', month.abb[pred_mon]))
+df_cv <- NULL
+load = array(NA, dim = c(Ngroups, length(f.out$Alldata[1,]), Ncomp))
+
+for(igroup in 1:Ngroups){ # Start loop over groups
+  
+  ## Define predictand
+  Ypredictand   = f.out$nldasVar[-xvalindex[[igroup]]]        # Observed nldasVar for the training period
+  Yverif        = f.out$nldasVar[xvalindex[[igroup]]]     
+  
+  ## Extract predictors (separate training from verification dataset)
+  Xtrain      = f.out$Alldata[-xvalindex[[igroup]],]
+  Xverif      = f.out$Alldata[ xvalindex[[igroup]],]
+  
+  ## Fit PLSR model and predict! - from 'PredictPLSRCrossVal.R' function
+  mydf        = data.frame(Ypredictand)
+  mydf$X      = Xtrain
+  
+  ## perform PLSR - with no NAs (SST)
+  # apply PLSR using function from 'PredictPLSRCrossVal.R' function
+  # plsrmod     = plsr(Ypredictand ~ X, ncomp = Ncomp, data = mydf) #, method='simpls', validation = 'CV'
+  plsrmod     = plsr(Ypredictand ~ X, ncomp = Ncomp, data = mydf, 
+                     model = TRUE, x = TRUE, y = TRUE, #validation = 'CV',
+                     segments = Nsegments, segment.type='consecutive', method='simpls')
+  
+  load[igroup,,]        = loadings(plsrmod)[,1:Ncomp]
+  
+  ## predict Y
+  Yhat_ver    = predict(plsrmod, ncomp = Ncomp, Xverif, se.fit=T)
+  df_cv = rbind(df_cv, cbind(Yverif, Yhat_ver)) # add to df
+  
+}
+end.time = Sys.time() - beg.time
+
+##### ===== organize data
+df = data.frame(date = date_val$date,
+                ind = 1:Nval,
+                Y_plsr = df_cv[,2] * f.out$Ysd + f.out$Ymean, # unscale
+                Y_cfs = left_join(date_val, f.out$cfs_pred_df, by = 'date')$var,
+                Y_nld = df_cv[,1] * f.out$Ysd + f.out$Ymean) # unscale
+df$Y_plsr = ifelse(df$Y_plsr <0, 0, df$Y_plsr) # remove negatives
+df$res_plsr = df$Y_plsr - df$Y_nld
+df$res_cfs = df$Y_cfs - df$Y_nld
+
+## save results
+setwd(model_plsrbase_dir)
+data = list(df = df, load = load, run.time = end.time, vars_nms = var_nms[preds],
+            grid = f.out$grid, ind_pred = f.out$ind_pred)
+saveRDS(data, file = file_mdlResults)
+print(paste('saved... ', file_mdlResults))
+
+
+## calculate residual and correlation for cfsv2 and model
+print(paste('Abs Error: Raw =', round(mean(abs(df$res_cfs)),digits = 4),
+            '; PLSR base =', round(mean(abs(df$res_plsr)),digits = 4)))
+print(paste('Cor: Raw =', round(cor(df$Y_nld, df$Y_cfs),digits = 4),
+            '; PLSR base =', round(cor(df$Y_nld, df$Y_plsr),digits = 4)))
+
+print(paste('Simulation Time:', round(end.time, 2), 'mins'))

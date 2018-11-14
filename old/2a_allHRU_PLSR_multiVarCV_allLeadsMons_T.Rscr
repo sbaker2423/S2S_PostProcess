@@ -1,0 +1,203 @@
+#!/opt/R-3.2.3/bin//Rscript
+
+# ================================================================================ 
+# Step 2a: Process all HRUs input variable (cross-validated); 
+#          Takes ~10 mins
+#
+# Created by S. Baker, August 2018
+# ================================================================================ 
+rm(list=ls())
+
+# ## === Input Data
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/ProcessDataFunc.R")
+beg.time         = Sys.time()
+
+Nparallel       = 12
+hru = 'all'
+
+print('starting...')
+print(beg.time)
+
+## === libraries
+suppressMessages(library(lubridate))
+suppressMessages(library(ncdf4))
+suppressMessages(library(abind))
+suppressMessages(library(OceanView))
+suppressMessages(library(pls))
+suppressMessages(library(dplyr))
+#suppressMessages(library(plyr))
+library(parallel)
+
+pred_base = c(8) # uses two preds max
+
+### === loop through each predictand, wk period, and month === ###
+for (pred_var in c('tmp2m')) {
+  for (wk in c('2_3', '3_4')) {
+    for (pred_mon in c(1:12)) {
+      
+      ## Organize Predictors
+      pred_2 = ifelse(pred_var == 'prate', 11, 10)
+      if (length(pred_base) == 2) {
+        preds = c(pred_base[1], pred_2, pred_base[2])
+      } else {
+        preds = c(pred_base[1], pred_2)
+      }
+      
+      ## Input data (deleted every loop and needs to be read in again)
+      source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/0_control_PLSRmdl.R")
+      print(paste('running PLSR for bi-weekly period', wk, 'for predictand month', month.name[pred_mon],'...'))
+      print(paste('elapsed time ...'))
+      print(Sys.time() - beg.time)
+      
+      ## get month numbers for surrounding months
+      mon_in           = c(pred_mon-1,pred_mon,pred_mon+1)   # month to analyze
+      for(i in 1:length(mon_in)) { 
+        if(mon_in[i] > 12) { mon_in[i] = mon_in[i] - 12 }
+        if(mon_in[i] < 1) { mon_in[i] = mon_in[i] + 12 }
+      }
+      
+      ### ===== PLSR --- Only run if hasnt been run before ===== ###
+      setwd(allHRU_multiVar_dir)
+      if (!file.exists(file_all_multiVar)) {
+        
+        ## === Load CFSv2 Data 
+        setwd(out_model_dir)
+        load(file = file_data)
+        nms = names(data_out)
+        
+        ## extract objects
+        pred_cfs = data_out[[nms[1]]]
+        grid = data_out[[nms[2]]]
+        var_nms = c(data_out[[nms[3]]], 'hru_cfs')
+        date_cfs = data_out[[nms[4]]]
+        rm(data_out)
+        
+        ## Process data into PLSR predictor and predictand format
+        setwd(allHRU_multiVar_dir)
+        if (file.exists(file_input_multiVar)) {
+          # load if exists and save doesnt
+          print(paste('loading...', file_input_multiVar))
+          setwd(allHRU_multiVar_dir)
+          f.out = readRDS(file = file_input_multiVar)
+        } else {
+          # process if doesnt exist
+          f.out = ReadProcInputData(preds, pred_cfs, grid, var_nms, date_cfs)
+          setwd(allHRU_multiVar_dir)
+          saveRDS(f.out, file = file_input_multiVar)
+          print(paste('saved...', file_input_multiVar))
+        }
+        
+        ## ===  get groups for validation
+        Ntime           = length(pred_cfs[1,1,1,])
+        date_val        = filter(f.out$date_v, mon == pred_mon)
+        Nval            = nrow(date_val)
+        Ngroups         = ceiling(Nval/Ntime_sub)
+        cutgroup        = sapply(1:Ngroups, function(j) c(rep(j,Ntime_sub)))[1:Nval] #not random
+        xvalindex       = split(date_val$ind, cutgroup) # validate on these indexes
+        Nsegments       = length(xvalindex)-1
+        
+        ## === Predicat - loop over training/verification groups
+        print(paste(pred_var, '- PLSR for variables in CV - Forecasting', wk, 'wk -', month.abb[pred_mon]))
+        df_cv <- NULL
+        load = array(NA, dim = c(Ngroups, length(f.out$Alldata[1,]), Ncomp))
+        
+        
+        ### ===  Setup Parallelization
+        library(foreach)
+        library(doParallel)
+        #cl<-makeCluster(Nparallel)
+        
+        library(doSNOW)
+        cluster = makeCluster(Nparallel, type = "SOCK")
+        registerDoSNOW(cluster)
+        print('Aquired nodes...')
+        
+        ### ===  Loop through each hru
+        hru_v_nld = f.out$hru_v_nld
+        data_hrus = 
+          foreach(hru_i = hru_v_nld, 
+                  .combine = list,
+                  .multicombine = T)  %dopar%   {
+                    
+                    #hru_i = f.out$hru_v_nld[1]
+                    
+                    # extract hru coordinates for NLDAS and CFSv2
+                    hruInd_nld = which(f.out$hru_v_nld == hru_i)
+                    hruInd_cfs = which(f.out$hru_v_cfs == hru_i)
+                    
+                    nld_df = f.out$nldasVar[hruInd_nld,]
+                    cfs_pred_i = as.vector(f.out$cfs_pred_df[,(hruInd_cfs+1)])
+                    
+                    ## Scale NLDAS variable
+                    nldasVar      = scale(nld_df)
+                    Ymean         = mean(nld_df)     # Mean nldasVar during training period
+                    Ysd           = sd(nld_df)       # Standard deviation of nldasVar during training period
+                    
+                    ##### ===== Predicat - loop over each potential predictor ===== ##### 
+                    print(paste('Lagged =', l, '- hru ', hru_i))
+                    # df_out <- matrix(NA, ncol = 8, nrow = Nval*length(preds))
+                    load = array(NA, dim = c(Ngroups, length(f.out$Alldata[1,]), Ncomp))
+                    
+                    df_cv <- NULL
+                    
+                    for(igroup in 1:Ngroups){ # Start loop over groups
+                      
+                      ## Define predictand
+                      Ypredictand   = nldasVar[-xvalindex[[igroup]]]        # Observed nldasVar for the training period
+                      Yverif        = nldasVar[xvalindex[[igroup]]] #  [date_val$ind]  
+                      
+                      ## Extract predictors (separate training from verification dataset)
+                      Xtrain      = f.out$Alldata[-xvalindex[[igroup]],]
+                      Xverif      = f.out$Alldata[ xvalindex[[igroup]],]
+                      
+                      ## Fit PLSR model and predict! - from 'PredictPLSRCrossVal.R' function
+                      mydf        = data.frame(Ypredictand)
+                      mydf$X      = Xtrain
+                      
+                      ## perform PLSR - looks like it is double cv...
+                      plsrmod     = pls::plsr(Ypredictand ~ X, ncomp = Ncomp, data = mydf, 
+                                              model = TRUE, x = TRUE, y = TRUE, #validation = 'CV',
+                                              segments=Nsegments, segment.type='consecutive', method='simpls')
+                      
+                      # collect loadings for each training period
+                      load[igroup,,] = loadings(plsrmod)[,1:Ncomp]
+                      
+                      ## predict Y and save
+                      Yhat_ver    = predict(plsrmod, ncomp = Ncomp, Xverif, se.fit=T)
+                      df_cv = rbind(df_cv, cbind(Yverif, Yhat_ver))
+                    }
+                    
+                    # collect data from predictor
+                    df = data.frame(date   = date_val$date,
+                                    ind    = 1:Nval,
+                                    Y_plsr = df_cv[,2] * Ysd + Ymean, 
+                                    Y_cfs  = dplyr::left_join(date_val, cbind.data.frame(date = f.out$cfs_pred_df$date, var = cfs_pred_i), by = 'date')$var,
+                                    Y_nld  = df_cv[,1] * Ysd + Ymean)
+                    df$Y_plsr   = ifelse(df$Y_plsr <0, 0, df$Y_plsr) # remove negatives
+                    df$res_plsr = df$Y_plsr - df$Y_nld
+                    df$res_cfs  = df$Y_cfs - df$Y_nld
+                    
+                    # print cor
+                    print(paste('Cor predictor =', round(cor(df$Y_plsr, df$Y_nld), digits = 4), 
+                                '; Raw Cor =', round(cor(df$Y_cfs, df$Y_nld), digits = 4)))
+                    
+                    
+                    ## save results
+                    list(hru = hru_i, df = df, load = load)
+                    
+                  }
+        stopCluster(cluster)
+        end.time = Sys.time() - beg.time
+        print('Saving file...')
+        
+        ## save results
+        setwd(allHRU_multiVar_dir)
+        saveRDS(data_hrus, file = file_all_multiVar)
+        print(paste('saved...', file_all_multiVar))
+        
+        print(paste('Elapsed Time...')); Sys.time() - beg.time
+        
+      }
+    }
+  }
+}

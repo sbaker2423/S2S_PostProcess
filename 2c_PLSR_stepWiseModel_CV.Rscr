@@ -1,0 +1,309 @@
+#!/opt/R-3.2.3/bin//Rscript
+
+# ================================================================================ 
+# Step 2c: Predict using stepwise PLSR model - cross-validated (hierarchical)
+#          Uses first component from first predictor to predict P or T (MDL 1)
+#          Predicts residulas of MDL 1 using second predictor
+#          Predicts residulas of MDL 2 using third predictor (if available)
+#          Script uses only first component from each predictor (over writes input file)
+#
+# Created by S. Baker, June 2018
+# ================================================================================ 
+rm(list=ls()); beg.time = Sys.time()
+
+## === Source to Input Data
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/0_control_PLSRmdl.R")
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/ProcessDataFunc.R")
+
+## == input arguments
+args = commandArgs(trailingOnly=TRUE)
+argsLen <- length(args)
+
+# test if there is at least one argument: if not, return an error
+if (argsLen != 1 & !exists('preds')) {
+  stop("Two argument must be supplied: CFSv2 var name in folder
+       (eg. 'z500_f') and name in nc (eg. 'HGT_500mb').", call.=FALSE)
+} else if (argsLen == 1) {
+  preds <- as.numeric(strsplit(args, ",")[[1]]) # eg. 2,3,4
+  if (exists('preds')) { print("Warning: Commandline 'pred' input overrides 'preds' in source input")}
+}
+print(preds)
+
+
+### === Output file names
+if (cut_domain) {
+  file_mdlResults   = paste0('CVresults_',pred_var, '_',hru,'_wk', wk, '_mon.', pred_mon,'_cut.',cut_num,'_lag.',l,
+                                   '_', paste(preds, collapse = '.'),'_stepwise.rds')
+} else {
+  file_mdlResults   = paste0('CVresults_',pred_var, '_',hru,'_wk', wk, '_mon.', pred_mon,'_stepwise.rds')
+}
+
+
+##### ===== Load CFSv2 Data 
+setwd(out_model_dir)
+load(file = file_data)
+nms = names(data_out)
+
+## extract objects
+pred_cfs = data_out[[nms[1]]]
+grid = data_out[[nms[2]]]
+var_nms = c(data_out[[nms[3]]], 'hru_cfs')
+date_cfs = data_out[[nms[4]]]
+rm(data_out)
+
+## == process data into PLSR predictor and predictand format (scaled)
+f.out = ReadProcInputData(preds, pred_cfs, grid, var_nms, date_cfs, outformat = 'list')
+
+##### =====  get groups for validation
+Ntime           = length(pred_cfs[1,1,1,])
+date_val        = filter(f.out$date_v, mon == pred_mon)
+Nval            = nrow(date_val)
+Ngroups         = ceiling(Nval/Ntime_sub)
+cutgroup        = sapply(1:Ngroups, function(j) c(rep(j,Ntime_sub)))[1:Nval] #not random
+xvalindex       = split(date_val$ind, cutgroup) # validate on these indexes
+Nsegments       = length(xvalindex)-1
+
+
+# ## check if analysis is lagged and lagged data is saved yet
+# if (l > 0) {
+#   if (!file.exists(file_lag_in)){
+#     stop("Run '2a_PLSR_data_prep.R to created lagged data file.", call.=FALSE)
+#   } else {
+#     pred_cfs = readRDS(file_lag_in)
+#   }
+# }
+# 
+# ##### ===== Load NLDAS Data 
+# setwd(TP_data)
+# file_nld   = nc_open(paste0('nldas.1_2.', pred_var, '.nc')) 
+# 
+# # Extract hru coordinates for NLDAS
+# hru_v   = ncvar_get(file_nld, "hru")  # hru
+# hruInd = which(hru_v == hru)
+# 
+# ## read time and find overlapping index
+# time = ncvar_get(file_nld, "time")
+# date_nld = as.POSIXct((time - 7) * 86400, 
+#                       origin = '1980-01-01', tz = 'utc') #timeseries of day 1 of obs
+# ind_overlap = inner_join(data.frame(date = date_cfs), 
+#                          data.frame(date = date_nld, ind = 1:length(date_nld)), by = 'date')
+# 
+# ## read variable and convert units
+# nld_df   = ncvar_get(file_nld, pred_var)[hruInd, unique(ind_overlap$ind)]
+# if (pred_var == 'prate') { nld_df = nld_df * 24 } ## convert mm/hr to mm/d
+# nc_close(file_nld)
+# 
+# ##### ===== Load CFSv2 T & P prediction on HRU
+# file_pred   = nc_open(paste0('cfsv2.', wk, '.', pred_var, '.nc')) 
+# time_pred = ncvar_get(file_pred, "time")
+# hru_v   = ncvar_get(file_pred, "hru")  # hru
+# hruInd = which(hru_v == hru)
+# 
+# ## get date and mearge
+# date_pred = as.POSIXct(as.Date(as.POSIXct(time_pred - 6*86400, 
+#                                           origin = '1970-01-01', tz = 'utc'))) #timeseries of day 1 in cst
+# df_date = data.frame(date = date_pred, ind = 1:length(date_pred))
+# ind_overlap = left_join(ind_overlap, df_date, by = 'date')
+# cfs_pred_df   = ncvar_get(file_pred, pred_var)[hruInd, ind_overlap$ind.y]
+# if (pred_var == 'prate') { cfs_pred_df = cfs_pred_df * 86400 } ## convert kg/m^2/s to mm/d
+# cfs_pred_df = data.frame(date = ind_overlap$date, var = cfs_pred_df)
+# cfs_pred_df = cfs_pred_df %>% group_by(date) %>% summarise(var= mean(var)) # daily average
+# 
+# ## Scale NLDAS variable
+# nldasVar      = scale(nld_df)
+# Ymean         = mean(nld_df)     # Mean nldasVar during training period
+# Ysd           = sd(nld_df)       # Standard deviation of nldasVar during training period
+# 
+# 
+# ##### =====  get groups for validation?
+# Ntime           = length(pred_cfs[1,1,1,])
+# date_v          = unique(ind_overlap$date)
+# date_v          = data.frame(date = date_v, mon = month(date_v), ind = 1:length(date_v))
+# date_val        = filter(date_v, mon == pred_mon) # just predicted month
+# # yrs = unique(year(date_v$date))
+# # test= cbind.data.frame(date_v, cv_grp = rep(NA,nrow(date_v)))
+# # i=1
+# # d_t = as.Date(paste0(yrs[i], '-', pred_mon, '-01'))
+# # sd = som(d_t - 1) #start of previous month
+# # ed = eom(d_t  + 35) #end of following month
+# # which(date_v$date >= sd & date_v$date <= ed)
+# # 
+# # cv_grps = 1
+# Nval            = nrow(date_val)
+# Ngroups         = ceiling(Nval/Ntime_sub)
+# cutgroup        = sapply(1:Ngroups, function(j) c(rep(j,Ntime_sub)))[1:Nval] #not random
+# xvalindex       = split(date_val$ind, cutgroup) # validate on these indexes
+# Nsegments       = length(xvalindex)-1
+# 
+# ##### ===== Arrange data for PLSR
+# print('arranging data...first predictor')
+# ind_pred <- NULL 
+# Alldata <- list()
+# for(ipred in preds){ # Start loop over selected predictors
+#   
+#   # if hru, do different than gridded vars
+#   if (var_nms[ipred] == 'hru') {
+#     pred_i = array(cfs_pred_df$var, dim = c(Ntime,1))
+#   } else {
+#     
+#     Ny = length(na.omit(unique(grid[ipred, 1,])))
+#     Nx = length(na.omit(unique(grid[ipred, 2,])))
+#     
+#     pred_i = array(0,dim=c(Ntime,Nx*Ny))
+#     
+#     for(ilon in 1:Nx){
+#       for(ilat in 1:Ny){
+#         pred_i[,(Ny * (ilon - 1) + ilat)]  = pred_cfs[ipred,ilon,ilat,]
+#       }
+#     }
+#   }
+#   
+#   # remove NAs (from SST or any other vars)
+#   t = which(!is.na(pred_i[1,]), TRUE)
+#   pred_i = pred_i[,t]
+#   
+#   # get beginning of data
+#   # ind_pred = c(ind_pred, ncol(Alldata)) #last ind of var
+#   
+#   # For SST - get predictor in correct format
+#   if (var_nms[ipred] == 'sst') {
+#     df = na.omit(data.frame(y= grid[ipred ,1, ],  x = grid[ipred ,2,]))
+#     ## sst has NA's that need to be removed
+#     grid_sst = df[t,] #save grid
+#   }
+#   
+#   # bind data
+#   Alldata[[ipred]]   <- scale(pred_i)
+# } 
+# 
+# # scale - necessary?
+# # ArrayCFS        = scale(Alldata) #produces NAs
+# # ind_pred         = c(0, ind_pred, ncol(Alldata))
+
+
+
+##### ===== Predicat - loop over training/verification groups
+print(paste(pred_var, '- PLSR for variables in CV - Forecasting', wk, 'wk -', month.abb[pred_mon]))
+#df_cv <- NULL
+#load = array(NA, dim = c(length(preds), Ngroups, length(ArrayCFS[1,]), Ncomp))
+#load_ls = list()
+Ncomp = 1
+Npred = length(preds)
+# beg.time = Sys.time()
+
+
+## arrange predictor grids
+ArrayCFS.1 = f.out$Alldata[[preds[1]]]
+ArrayCFS.2 = f.out$Alldata[[preds[2]]]
+grid.1 = length(ArrayCFS.1[1,]); grid.2 = length(ArrayCFS.2[1,])
+max_grid = max(grid.1, grid.2)
+if (Npred == 3) {
+  ArrayCFS.3 = f.out$Alldata[[preds[3]]]
+  grid.3 = length(ArrayCFS.3[1,])
+  max_grid = max(grid.1, grid.2, grid.3)
+}
+
+## loop through and cross validate
+df_cv <- NULL
+load_cv <- array(NA, dim = c(Ngroups, max_grid, Npred))
+
+for(igroup in 1:Ngroups){ # Start loop over groups
+  
+  ## Define predictand
+  Ypredictand   = f.out$nldasVar[-xvalindex[[igroup]]]        # Observed nldasVar for the training period
+  Yverif        = f.out$nldasVar[xvalindex[[igroup]]]     
+  
+  ## Extract predictors (separate training from verification dataset)
+  Xtrain.1      = ArrayCFS.1[-xvalindex[[igroup]],]
+  Xverif.1      = ArrayCFS.1[ xvalindex[[igroup]],]
+  Xtrain.2      = ArrayCFS.2[-xvalindex[[igroup]],]
+  Xverif.2      = ArrayCFS.2[ xvalindex[[igroup]],]
+  if (Npred == 3) {
+    Xtrain.3      = ArrayCFS.3[-xvalindex[[igroup]],]
+    Xverif.3      = ArrayCFS.3[ xvalindex[[igroup]],]
+  }
+
+  ### === Training 
+  
+  ## perform PLSR - step 1
+  mydf        = data.frame(Ypredictand)
+  mydf$X      = Xtrain.1
+  plsrmod.1     = plsr(Ypredictand ~ X, ncomp = Ncomp, data = mydf, 
+                       model = TRUE, x = TRUE, y = TRUE, #validation = 'CV',
+                       segments=Nsegments, segment.type='consecutive', method='simpls')
+  res.1 = plsrmod.1$residuals # obs - pred
+  #head(plsrmod.1$fitted.values - Ypredictand)
+  
+  ## perform PLSR - step 2
+  mydf        = data.frame(res.1)
+  mydf$X      = Xtrain.2
+  plsrmod.2     = plsr(res.1 ~ X, ncomp = Ncomp, data = mydf, 
+                       model = TRUE, x = TRUE, y = TRUE, #validation = 'CV',
+                       segments=Nsegments, segment.type='consecutive', method='simpls')
+  res.2 = plsrmod.2$residuals
+  
+  ## perform PLSR - step 2
+  if (Npred == 3) {
+    mydf        = data.frame(res.2)
+    mydf$X      = Xtrain.3
+    plsrmod.3     = plsr(res.2 ~ X, ncomp = Ncomp, data = mydf, 
+                         model = TRUE, x = TRUE, y = TRUE, #validation = 'CV',
+                         segments=Nsegments, segment.type='consecutive', method='simpls')
+    res.3 = plsrmod.3$residuals
+    load_cv[igroup,,3]        = c(loadings(plsrmod.3)[,1], rep(NA, (max_grid - grid.3)))
+  }
+  
+  ## collect loadings
+  load_cv[igroup,,1]        = c(loadings(plsrmod.1)[,1], rep(NA, (max_grid - grid.1)))
+  load_cv[igroup,,2]        = c(loadings(plsrmod.2)[,1], rep(NA, (max_grid - grid.2)))
+  
+  ### === Verification
+  ## Step 1 - predict and get res
+  Yhat_Ver.1 = predict(plsrmod.1, ncomp = Ncomp, Xverif.1, se.fit=T)
+  reshat_Ver.2 = predict(plsrmod.2, ncomp = Ncomp, Xverif.2, se.fit=T)
+  Yhat_Ver.2 = Yhat_Ver.1 + reshat_Ver.2 
+  if (Npred == 3) {
+    reshat_Ver.3 = predict(plsrmod.3, ncomp = Ncomp, Xverif.3, se.fit=T)
+  } else {
+    reshat_Ver.3 = 0
+  }
+  Yhat_Ver.3 = Yhat_Ver.1 + reshat_Ver.2 + reshat_Ver.3
+  
+  # combine data
+  df_cv = rbind(df_cv, cbind(Yverif, Yhat_Ver.1, Yhat_Ver.2, Yhat_Ver.3))
+  
+}
+
+end.time = Sys.time() - beg.time
+
+##### ===== organize data
+df_cv = as.data.frame(df_cv)
+df    = data.frame(date = date_val$date,
+                ind = 1:Nval,
+                Y_plsr_1 = df_cv$Yhat_Ver.1 * f.out$Ysd + f.out$Ymean, # unscale
+                Y_plsr_2 = df_cv$Yhat_Ver.2 * f.out$Ysd + f.out$Ymean, # unscale
+                Y_plsr_3 = df_cv$Yhat_Ver.3 * f.out$Ysd + f.out$Ymean, # unscale
+                Y_cfs = left_join(date_val, f.out$cfs_pred_df, by = 'date')$var,
+                Y_nld = df_cv$Yverif * f.out$Ysd + f.out$Ymean) # unscale
+df$Y_plsr   = ifelse(df$Y_plsr_3 <0, 0, df$Y_plsr_3) # remove negatives
+df$res_plsr = df$Y_plsr_3 - df$Y_nld
+df$res_cfs  = df$Y_cfs - df$Y_nld
+
+
+
+
+
+## save results
+setwd(model_stepwisePLSR_dir)
+data = list(df = df, load = load_cv, run.time = end.time, vars_nms = var_nms[preds],
+            grid = f.out$grid, ind_pred = f.out$ind_pred)
+saveRDS(data, file = file_mdlResults)
+print(paste('saved... ', file_mdlResults))
+
+
+## calculate residual and correlation for cfsv2 and model
+print(paste('Abs Error: Raw =', round(mean(abs(df$res_cfs)),digits = 4),
+            '; PLSR =', round(mean(abs(df$res_plsr)),digits = 4)))
+print(paste('Cor: Raw =', round(cor(df$Y_nld, df$Y_cfs),digits = 4),
+            '; PLSR =', round(cor(df$Y_nld, df$Y_plsr),digits = 4)))
+print(paste('Simulation Time:', round(end.time, 2), 'mins'))

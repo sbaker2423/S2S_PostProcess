@@ -1,0 +1,7 @@
+#!/opt/R-3.2.3/bin//Rscript
+
+## Run 2b,c,d to see which process produces the best results
+
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/2b_PLSR_baseModel_CV.Rscr")
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/2c_PLSR_stepWiseModel_CV.Rscr")
+source("/home/sabaker/s2s/analysis/scripts/cfsv2_analysis/post_process/plsr/2d_PCR_MLR_CV.Rscr")
