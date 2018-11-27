@@ -33,7 +33,7 @@ library(tidyverse)
 ### === loop through each wk period and month === ###
 wk_i = '1_2'; pred_mon = 1
 for (wk_i in c('1_2')) {#c('2_3', '3_4')) {
-  for (pred_mon in c(6:12)) {
+  for (pred_mon in c(11:12)) {
     
     # wk_i = '1_2'
     
