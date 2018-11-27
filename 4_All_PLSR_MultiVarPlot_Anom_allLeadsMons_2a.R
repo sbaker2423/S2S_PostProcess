@@ -69,7 +69,7 @@ if (save_cor_plots) {
     }
     
     ## === Statistic loop vec
-    stat_type = stat_type_v[1]
+    stat_type = stat_type_v[2]
     for (stat_type in stat_type_v) {
       
       df_anom$best_fcst = ifelse(df_anom$ACC_cfs > df_anom$ACC_plsr, 'cfs', 'plsr')
@@ -97,7 +97,7 @@ if (save_cor_plots) {
         cust_pal_base = rev(colorRampPalette(brewer.pal((11),"Spectral"))(n_col))
         lab_base = gsub(',',' - ', levels(df_anom$bins_base)) # replace legend labels
         
-        legend_title = c('Correlation', 'Correlation', 'Cor Inc.')
+        legend_title = c('ACC', 'ACC', 'ACC Inc.')
       } else if (stat_type == 'AbErr') {
         
         ## process statistic
@@ -197,6 +197,24 @@ if (save_cor_plots) {
           # ggsave('legend_sample_MAE_inc.png', statInc, width = 5, dp = plot_set[3])
         }
       }
+      
+      ## === Histogram plots of skill or error metrics
+      if (time_p == 'Mon') {
+        df_boxplot = df_anom %>% select(wk, mon_pred, paste0(stat_type, '_plsr'), paste0(stat_type, '_cfs'), paste0(stat_type, '_max'))
+      } else {
+        df_boxplot = df_anom %>% select(wk, seas, paste0(stat_type, '_plsr'), paste0(stat_type, '_cfs'), paste0(stat_type, '_max'))
+      }
+      colnames(df_boxplot)[c(2:5)] <- c('time_per', 'PLSR', 'CFSv2', 'Best Model')
+      df_boxplot = tidyr::gather(df_boxplot, 'Model', 'stat', 3:5)
+      
+      ## plot
+      g <- ggplot(df_boxplot, aes(x = wk, y = stat, fill = Model)) +
+        geom_hline(yintercept = 0, color = 'grey', linetype = 'dashed') +
+        theme_bw() +
+        geom_boxplot() + labs(y = legend_title[1], x = 'Bi-weekly Period') + 
+        facet_grid(time_per ~ .)
+      ## save
+      ggsave(paste0('boxplot_summary_', stat_type, '.png'), g, height = 8, width = 4, dpi = 200)
     }
   }
 }
