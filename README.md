@@ -1,5 +1,6 @@
 # S2S_PostProcess
 
+## Files organization
 0_control_PLSRmdl.R 
 - input for all other scripts
 - sets domain and 'cut' number
@@ -20,3 +21,12 @@
 
 4_... 
 - plots to visualize results
+
+
+## Git cheater instructions
+after making edits...
+- git add -u (or maybe *)
+- git commit -m "commit message"
+- git push origin master
+- respond to username/password 
+- done!
